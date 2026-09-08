@@ -1,0 +1,551 @@
+--- a/common.gypi
++++ b/common.gypi
+@@ -200,7 +200,7 @@
+             }],
+           ],
+         },
+-        'cflags': [ '-O3' ],
++        'cflags': [ '-Os' ],
+         'conditions': [
+           ['enable_lto=="true"', {
+             'cflags': ['<(lto)'],
+@@ -309,7 +309,11 @@
+             ],
+           },],
+           ['OS == "android"', {
+-            'cflags': [ '-fPIC', '-I<(android_ndk_path)/sources/android/cpufeatures' ],
++            'cflags': [
++              '-fPIC',
++              '-fvisibility=hidden',
++              '-I<(android_ndk_path)/sources/android/cpufeatures',
++            ],
+             'ldflags': [ '-fPIC' ]
+           }],
+           ['clang==1', {
+@@ -334,7 +338,7 @@
+           }
+         },
+         'xcode_settings': {
+-          'GCC_OPTIMIZATION_LEVEL': '3', # stop gyp from defaulting to -Os
++          'GCC_OPTIMIZATION_LEVEL': 's',
+         },
+       }
+     },
+--- a/deps/uv/uv.gyp
++++ b/deps/uv/uv.gyp
+@@ -296,6 +296,22 @@
+           ],
+           'link_settings': {
+             'libraries': [ '-ldl' ],
++          },
++        }],
++        [ '_toolset=="host" and host_os=="mac" and OS=="android"', {
++          'defines': [
++            '_DARWIN_USE_64_BIT_INODE=1',
++            '_DARWIN_UNLIMITED_SELECT=1',
++          ],
++          'sources!': [
++            '<@(uv_sources_android)',
++          ],
++          'sources': [
++            '<@(uv_sources_apple)',
++            '<@(uv_sources_bsd_common)',
++          ],
++          'link_settings': {
++            'libraries!': [ '-ldl' ],
+           },
+         }],
+         [ 'OS=="solaris"', {
+--- a/deps/zlib/zlib.gyp
++++ b/deps/zlib/zlib.gyp
+@@ -201,6 +201,11 @@
+                 'USE_FILE32API'
+               ],
+             }],
++            ['OS=="android"', {
++              'sources': [
++                '<(ZLIB_ROOT)/android_cpu_features.c',
++              ],
++            }],
+             # Incorporate optimizations where possible.
+             ['(target_arch in "ia32 x64" and OS!="ios") or arm_fpu=="neon"', {
+               'dependencies': [ 'zlib_data_chunk_simd' ],
+--- /dev/null
++++ b/deps/zlib/android_cpu_features.c
+@@ -0,0 +1,3 @@
++#if defined(__ANDROID__)
++#include "cpu-features.c"
++#endif
+--- a/node.gyp
++++ b/node.gyp
+@@ -108,6 +108,8 @@
+       'src/js_udp_wrap.cc',
+       'src/module_wrap.cc',
+       'src/node.cc',
++      'src/node_android.cc',
++      'src/node_android.h',
+       'src/node_api.cc',
+       'src/node_binding.cc',
+       'src/node_blob.cc',
+@@ -845,6 +847,7 @@
+       'defines': [
+         'NODE_ARCH="<(target_arch)"',
+         'NODE_PLATFORM="<(OS)"',
++        'NODE_ANDROID_LIBNODE=1',
+         'NODE_WANT_INTERNALS=1',
+         # Define NAPI_EXPERIMENTAL to enable Node-API experimental function symbols being exposed.
+         'NAPI_EXPERIMENTAL=1',
+@@ -1146,6 +1149,13 @@
+             'LD_DYLIB_INSTALL_NAME':
+               '@rpath/lib<(node_core_target_name).<(shlib_suffix)'
+           },
++        }],
++        [ 'node_shared=="true" and OS=="android" and '
++          'android_libnode_export_map!=""', {
++          'ldflags': [
++            '-Wl,--version-script=<(android_libnode_export_map)',
++            '-Wl,--undefined-version',
++          ],
+         }],
+         ['node_shared=="true" and OS in "aix os400"', {
+           'ldflags': ['--shared'],
+--- a/src/node.h
++++ b/src/node.h
+@@ -36,7 +36,9 @@
+ // the public API. They are implementation details that can and will
+ // change between releases, even in semver patch releases. Do not use
+ // any such symbol in external code.
+-#ifdef NODE_SHARED_MODE
++#if defined(NODE_ANDROID_LIBNODE)
++#define NODE_EXTERN_PRIVATE
++#elif defined(NODE_SHARED_MODE)
+ #define NODE_EXTERN_PRIVATE NODE_EXTERN
+ #else
+ #define NODE_EXTERN_PRIVATE
+--- /dev/null
++++ b/src/node_android.cc
+@@ -0,0 +1,254 @@
++// Copyright Node.js contributors. All rights reserved.
++// Use of this source code is governed by a license that can be found in the
++// LICENSE file.
++
++#include "node_android.h"
++
++#include <algorithm>
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <string>
++#include <thread>
++#include <vector>
++
++#include "node.h"
++
++#if defined(_WIN32)
++#include <direct.h>
++#define NODE_ANDROID_CHDIR _chdir
++#elif defined(__ANDROID__)
++#include <android/log.h>
++#include <unistd.h>
++#define NODE_ANDROID_CHDIR chdir
++#else
++#include <unistd.h>
++#define NODE_ANDROID_CHDIR chdir
++#endif
++
++namespace {
++
++#if defined(__ANDROID__)
++
++constexpr size_t kAndroidLogChunkSize = 4000;
++
++void WriteAndroidLogChunks(int priority,
++                           const std::string& tag,
++                           const char* data,
++                           size_t length) {
++  while (length > 0) {
++    const size_t chunk_length = std::min(length, kAndroidLogChunkSize);
++    std::string chunk(data, chunk_length);
++    while (!chunk.empty() && (chunk.back() == '\n' || chunk.back() == '\r')) {
++      chunk.pop_back();
++    }
++    if (!chunk.empty()) {
++      __android_log_write(priority, tag.c_str(), chunk.c_str());
++    }
++    data += chunk_length;
++    length -= chunk_length;
++  }
++}
++
++void DrainAndroidLogPipe(int fd, int priority, std::string tag) {
++  char buffer[4096];
++  for (;;) {
++    const ssize_t length = read(fd, buffer, sizeof(buffer));
++    if (length == 0) {
++      break;
++    }
++    if (length < 0) {
++      if (errno == EINTR) {
++        continue;
++      }
++      break;
++    }
++    WriteAndroidLogChunks(priority, tag, buffer, length);
++  }
++  close(fd);
++}
++
++class AndroidLogRedirect {
++ public:
++  AndroidLogRedirect() = default;
++  AndroidLogRedirect(const AndroidLogRedirect&) = delete;
++  AndroidLogRedirect& operator=(const AndroidLogRedirect&) = delete;
++
++  int Start() {
++    const char* requested_tag = getenv("NODE_ANDROID_LOG_TAG");
++    tag_ = requested_tag != nullptr && requested_tag[0] != '\0'
++               ? requested_tag
++               : "nodejs";
++
++    if (pipe(stdout_pipe_) != 0 || pipe(stderr_pipe_) != 0) {
++      ClosePipes();
++      return -1;
++    }
++
++    saved_stdout_ = dup(STDOUT_FILENO);
++    saved_stderr_ = dup(STDERR_FILENO);
++    if (saved_stdout_ < 0 || saved_stderr_ < 0 ||
++        dup2(stdout_pipe_[1], STDOUT_FILENO) < 0 ||
++        dup2(stderr_pipe_[1], STDERR_FILENO) < 0) {
++      Restore();
++      return -1;
++    }
++
++    stdout_thread_ =
++        std::thread(DrainAndroidLogPipe, stdout_pipe_[0], ANDROID_LOG_INFO,
++                    tag_);
++    stderr_thread_ =
++        std::thread(DrainAndroidLogPipe, stderr_pipe_[0], ANDROID_LOG_ERROR,
++                    tag_);
++    stdout_pipe_[0] = -1;
++    stderr_pipe_[0] = -1;
++    return 0;
++  }
++
++  ~AndroidLogRedirect() {
++    Restore();
++  }
++
++ private:
++  void ClosePipes() {
++    for (int& fd : stdout_pipe_) {
++      if (fd >= 0) {
++        close(fd);
++        fd = -1;
++      }
++    }
++    for (int& fd : stderr_pipe_) {
++      if (fd >= 0) {
++        close(fd);
++        fd = -1;
++      }
++    }
++  }
++
++  void Restore() {
++    if (saved_stdout_ >= 0) {
++      fflush(stdout);
++      dup2(saved_stdout_, STDOUT_FILENO);
++      close(saved_stdout_);
++      saved_stdout_ = -1;
++    }
++    if (saved_stderr_ >= 0) {
++      fflush(stderr);
++      dup2(saved_stderr_, STDERR_FILENO);
++      close(saved_stderr_);
++      saved_stderr_ = -1;
++    }
++
++    ClosePipes();
++    if (stdout_thread_.joinable()) {
++      stdout_thread_.join();
++    }
++    if (stderr_thread_.joinable()) {
++      stderr_thread_.join();
++    }
++  }
++
++  int stdout_pipe_[2]{-1, -1};
++  int stderr_pipe_[2]{-1, -1};
++  int saved_stdout_ = -1;
++  int saved_stderr_ = -1;
++  std::string tag_;
++  std::thread stdout_thread_;
++  std::thread stderr_thread_;
++};
++
++#endif  // defined(__ANDROID__)
++
++int SetEnvironmentAssignment(const char* assignment) {
++  if (assignment == nullptr) {
++    errno = EINVAL;
++    return -1;
++  }
++
++  const char* separator = strchr(assignment, '=');
++  if (separator == nullptr || separator == assignment) {
++    errno = EINVAL;
++    return -1;
++  }
++
++  std::string name(assignment, separator - assignment);
++  const char* value = separator + 1;
++#if defined(_WIN32)
++  return _putenv_s(name.c_str(), value);
++#else
++  return setenv(name.c_str(), value, 1);
++#endif
++}
++
++int SetEnvironmentVariable(const char* name, const char* value) {
++  if (value == nullptr) {
++    return 0;
++  }
++
++  std::string assignment(name);
++  assignment.push_back('=');
++  assignment.append(value);
++  return SetEnvironmentAssignment(assignment.c_str());
++}
++
++}  // namespace
++
++extern "C" int node_android_run(int argc,
++                                const char* const* argv,
++                                const char* cwd,
++                                const char* home,
++                                const char* tmpdir,
++                                const char* module_path,
++                                const char* const* envp) {
++  if (argc <= 0 || argv == nullptr) {
++    errno = EINVAL;
++    return -1;
++  }
++
++  for (int i = 0; i < argc; ++i) {
++    if (argv[i] == nullptr) {
++      errno = EINVAL;
++      return -1;
++    }
++  }
++
++  if (envp != nullptr) {
++    for (const char* const* current = envp; *current != nullptr; ++current) {
++      if (SetEnvironmentAssignment(*current) != 0) {
++        return -1;
++      }
++    }
++  }
++
++  if (SetEnvironmentVariable("HOME", home) != 0 ||
++      SetEnvironmentVariable("TMPDIR", tmpdir) != 0 ||
++      SetEnvironmentVariable("NODE_PATH", module_path) != 0) {
++    return -1;
++  }
++
++  if (cwd != nullptr && NODE_ANDROID_CHDIR(cwd) != 0) {
++    return -1;
++  }
++
++#if defined(__ANDROID__)
++  fflush(stdout);
++  fflush(stderr);
++  AndroidLogRedirect log_redirect;
++  if (log_redirect.Start() != 0) {
++    return -1;
++  }
++#endif
++
++  std::vector<std::vector<char>> argument_storage(argc);
++  std::vector<char*> mutable_argv(argc);
++  for (int i = 0; i < argc; ++i) {
++    const size_t length = strlen(argv[i]);
++    argument_storage[i].assign(argv[i], argv[i] + length);
++    argument_storage[i].push_back('\0');
++    mutable_argv[i] = argument_storage[i].data();
++  }
++
++  return node::Start(argc, mutable_argv.data());
++}
+--- /dev/null
++++ b/src/node_android.h
+@@ -0,0 +1,49 @@
++// Copyright Node.js contributors. All rights reserved.
++// Use of this source code is governed by a license that can be found in the
++// LICENSE file.
++
++#ifndef SRC_NODE_ANDROID_H_
++#define SRC_NODE_ANDROID_H_
++
++#include <stddef.h>
++
++#if defined(_WIN32)
++#define NODE_ANDROID_API __declspec(dllexport)
++#else
++#define NODE_ANDROID_API __attribute__((visibility("default")))
++#endif
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*
++ * Starts Node.js using a main()-style argument vector.
++ *
++ * argv must contain argc non-null strings and should normally include the
++ * executable name at argv[0]. envp is an optional null-terminated list of
++ * KEY=VALUE strings. Explicit directory arguments override values supplied
++ * through envp. The environment and working directory changes are process
++ * wide and remain in effect after this function returns.
++ *
++ * Returns the Node.js exit code, or -1 if the arguments or process setup are
++ * invalid. errno identifies the setup failure in the latter case.
++ *
++ * On Android, stdout is written to logcat with INFO priority and stderr with
++ * ERROR priority while Node.js is running. The logcat tag defaults to
++ * "nodejs" and can be overridden with NODE_ANDROID_LOG_TAG.
++ */
++NODE_ANDROID_API int node_android_run(
++    int argc,
++    const char* const* argv,
++    const char* cwd,
++    const char* home,
++    const char* tmpdir,
++    const char* module_path,
++    const char* const* envp);
++
++#ifdef __cplusplus
++}  // extern "C"
++#endif
++
++#endif  // SRC_NODE_ANDROID_H_
+--- a/tools/gyp/pylib/gyp/generator/make.py
++++ b/tools/gyp/pylib/gyp/generator/make.py
+@@ -174,13 +174,13 @@
+ define create_archive
+         rm -f $(1) $(1).$(OBJ_FILE_LIST); mkdir -p `dirname $(1)`
+         $(call write-to-file,$(1).$(OBJ_FILE_LIST),$(filter %.o,$(2)))
+-        $(AR.$(TOOLSET)) crs $(1) @$(1).$(OBJ_FILE_LIST)
++        $(if $(filter host,$(TOOLSET)),/usr/bin/libtool -static -o $(1) -filelist $(1).$(OBJ_FILE_LIST),$(AR.$(TOOLSET)) crs $(1) @$(1).$(OBJ_FILE_LIST))
+ endef
+ 
+ define create_thin_archive
+-        rm -f $(1) $(OBJ_FILE_LIST); mkdir -p `dirname $(1)`
++        rm -f $(1) $(1).$(OBJ_FILE_LIST); mkdir -p `dirname $(1)`
+         $(call write-to-file,$(1).$(OBJ_FILE_LIST),$(filter %.o,$(2)))
+-        $(AR.$(TOOLSET)) crsT $(1) @$(1).$(OBJ_FILE_LIST)
++        $(if $(filter host,$(TOOLSET)),/usr/bin/libtool -static -o $(1) -filelist $(1).$(OBJ_FILE_LIST),$(AR.$(TOOLSET)) crsT $(1) @$(1).$(OBJ_FILE_LIST))
+ endef
+ 
+ # We support two kinds of shared objects (.so):
+@@ -243,13 +243,13 @@
+ define create_archive
+         rm -f $(1) $(1).$(OBJ_FILE_LIST); mkdir -p `dirname $(1)`
+         $(call write-to-file,$(1).$(OBJ_FILE_LIST),$(filter %.o,$(2)))
+-        $(AR.$(TOOLSET)) crs $(1) @$(1).$(OBJ_FILE_LIST)
++        $(if $(filter host,$(TOOLSET)),/usr/bin/libtool -static -o $(1) -filelist $(1).$(OBJ_FILE_LIST),$(AR.$(TOOLSET)) crs $(1) @$(1).$(OBJ_FILE_LIST))
+ endef
+ 
+ define create_thin_archive
+-        rm -f $(1) $(OBJ_FILE_LIST); mkdir -p `dirname $(1)`
++        rm -f $(1) $(1).$(OBJ_FILE_LIST); mkdir -p `dirname $(1)`
+         $(call write-to-file,$(1).$(OBJ_FILE_LIST),$(filter %.o,$(2)))
+-        $(AR.$(TOOLSET)) crsT $(1) @$(1).$(OBJ_FILE_LIST)
++        $(if $(filter host,$(TOOLSET)),/usr/bin/libtool -static -o $(1) -filelist $(1).$(OBJ_FILE_LIST),$(AR.$(TOOLSET)) crsT $(1) @$(1).$(OBJ_FILE_LIST))
+ endef
+ 
+ # Due to circular dependencies between libraries :(, we wrap the
+@@ -258,7 +258,7 @@
+ quiet_cmd_link = LINK($(TOOLSET)) $@
+ quiet_cmd_link_host = LINK($(TOOLSET)) $@
+ cmd_link = $(LINK.$(TOOLSET)) $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -o $@ -Wl,--start-group $(LD_INPUTS) -Wl,--end-group $(LIBS)
+-cmd_link_host = $(LINK.$(TOOLSET)) $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -o $@ -Wl,--start-group $(LD_INPUTS) -Wl,--end-group $(LIBS)
++cmd_link_host = $(LINK.$(TOOLSET)) $(GYP_LDFLAGS) $(LDFLAGS.$(TOOLSET)) -o $@ $(LD_INPUTS) $(LIBS) -framework CoreFoundation
+ 
+ # Other shared-object link notes:
+ # - Set SONAME to the library filename so our binaries don't reference
+--- a/tools/v8_gypfiles/toolchain.gypi
++++ b/tools/v8_gypfiles/toolchain.gypi
+@@ -776,12 +776,13 @@
+           ['OS=="android"', {
+             'cflags!': [
+               '-O3',
++              '-O2',
+               '-Os',
+             ],
+             'cflags': [
+               '-fdata-sections',
+               '-ffunction-sections',
+-              '-O2',
++              '-Os',
+             ],
+           }],
+           ['OS=="mac"', {
+--- a/tools/v8_gypfiles/v8.gyp
++++ b/tools/v8_gypfiles/v8.gyp
+@@ -303,7 +303,7 @@
+         'abseil.gyp:abseil',
+       ],
+       'cflags!': ['-O3'],
+-      'cflags': ['-O1'],
++      'cflags': ['-Os'],
+       'sources': [
+         '<(SHARED_INTERMEDIATE_DIR)/torque-generated/src/builtins/js-to-wasm-tq-csa.h',
+         '<(SHARED_INTERMEDIATE_DIR)/torque-generated/src/builtins/js-to-wasm-tq-csa.cc',
+@@ -1184,7 +1184,7 @@
+           'conditions': [
+             ['v8_enable_webassembly==1', {
+               'conditions': [
+-                ['((_toolset=="host" and host_arch=="arm64" or _toolset=="target" and target_arch=="arm64") and (OS in "linux mac ios openharmony")) or ((_toolset=="host" and host_arch=="x64" or _toolset=="target" and target_arch=="x64") and (OS in "linux mac openharmony"))', {
++                ['((_toolset=="host" and host_arch=="arm64" and host_os in "linux mac ios openharmony") or (_toolset=="target" and target_arch=="arm64" and OS in "linux mac ios openharmony")) or ((_toolset=="host" and host_arch=="x64" and host_os in "linux mac openharmony") or (_toolset=="target" and target_arch=="x64" and OS in "linux mac openharmony"))', {
+                   'sources': [
+                     '<(V8_ROOT)/src/trap-handler/handler-inside-posix.cc',
+                     '<(V8_ROOT)/src/trap-handler/handler-outside-posix.cc',
+@@ -1488,12 +1488,13 @@
+             ],
+           },
+           'target_conditions': [
+-            ['_toolset=="host"', {
++            ['_toolset=="host" and host_os=="linux"', {
+               'sources': [
+                 '<(V8_ROOT)/src/base/debug/stack_trace_posix.cc',
+                 '<(V8_ROOT)/src/base/platform/platform-linux.cc',
+               ],
+-            }, {
++            }],
++            ['_toolset=="target"', {
+               'sources': [
+                 '<(V8_ROOT)/src/base/debug/stack_trace_android.cc',
+                 '<(V8_ROOT)/src/base/platform/platform-linux.cc',
+--- /dev/null
++++ b/tools/android-libnode-export-map.sh
+@@ -0,0 +1,17 @@
++#!/bin/sh
++set -eu
++
++output=${1:?output version script is required}
++
++{
++  printf '%s\n' '{' '  global:'
++  printf '%s\n' \
++    '    node_android_run;' \
++    '    node_module_register;' \
++    '    napi_*;' \
++    '    node_api_*;'
++  printf '%s\n' '  local: *;' '};'
++} > "$output"
++
++grep -q '^    node_android_run;$' "$output"
++grep -q '^    node_module_register;$' "$output"
