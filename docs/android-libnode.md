@@ -240,6 +240,34 @@ file dist/android-arm64/libnode.symbols.so
 加载 `libnode.so`，再调用 `node_android_run()`，并把
 `../docs/android-smoke-test.js` 作为 JS 入口传入。
 
+本目录的 `main.c` 提供一个可直接交叉编译的 native 宿主示例。它接收一个
+runtime 目录，其中必须包含 `android-smoke-test.js`；程序会在该目录创建
+`home` 和 `tmp` 子目录，并将其传给 `node_android_run()`：
+
+```bash
+NDK="$ANDROID_NDK"
+TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/darwin-x86_64"
+
+"$TOOLCHAIN/bin/aarch64-linux-android24-clang" \
+  -std=c11 -Wall -Wextra -Werror -fPIE -pie \
+  -Idist/android-arm64/include \
+  docs/main.c \
+  -Ldist/android-arm64 -lnode \
+  -Wl,-rpath,'$ORIGIN' \
+  -o node_android_smoke
+```
+
+将 `node_android_smoke`、`libnode.so` 和 `android-smoke-test.js` 部署到 App
+私有目录后运行：
+
+```text
+node_android_smoke /data/user/0/com.example.app/files/node
+node_android_smoke /data/user/0/com.example.app/files/node --network
+```
+
+默认输出使用 logcat tag `node-smoke`。`--network` 会设置
+`NODE_ANDROID_SMOKE_NETWORK=1`，启用本地回环 HTTP 测试。
+
 第三层是 JS API smoke test。`../docs/android-smoke-test.js` 会验证：
 
 - `process.platform`、`process.arch`、`process.versions` 等运行时元信息。

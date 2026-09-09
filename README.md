@@ -154,6 +154,10 @@ docs/android-smoke-test.js
 和 stream 等 Node API。Android 宿主集成时，应通过 `node_android_run()` 加载
 该脚本执行验证。
 
+`docs/main.c` 是可直接交叉编译的 Android native 测试宿主。它会加载同一
+runtime 目录中的 `android-smoke-test.js`，并创建测试所需的 `home`、`tmp`
+目录；传入 `--network` 可启用可选 HTTP loopback 检查。
+
 建议同时检查动态依赖和导出表：
 
 ```bash
@@ -181,5 +185,6 @@ logcat 输出。
 - [build-android-libnode.sh](build-android-libnode.sh)：一键构建脚本。
 - [docs/android-libnode.md](docs/android-libnode.md)：完整构建和集成说明。
 - [docs/android-smoke-test.js](docs/android-smoke-test.js)：JS API smoke test。
+- [docs/main.c](docs/main.c)：运行 smoke test 的 Android native `main()`。
 - [patchs/node-24.20.0-android-libnode.patch](patchs/node-24.20.0-android-libnode.patch)：源码补丁。
 - `dist/android-arm64/include/`：随二进制交付的公开 C ABI / Node-API 头文件。
