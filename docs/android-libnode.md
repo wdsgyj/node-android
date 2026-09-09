@@ -61,6 +61,28 @@ int node_android_run(
 表示的环境变量数组。函数内部调用 Node 的 embedding API，但这些 C++ 符号
 不会被外部链接。
 
+构建产物会将该头文件和 Node-API 所需头文件复制到
+`dist/android-arm64/include/`。`node_android.h` 包含最小调用示例，宿主
+可按以下方式使用：
+
+```c
+#include <node_android.h>
+
+const char* argv[] = { "node", "/data/user/0/example/files/main.js" };
+const char* envp[] = { "NODE_ENV=production", NULL };
+int exit_code = node_android_run(
+    2, argv,
+    "/data/user/0/example/files",
+    "/data/user/0/example/files/home",
+    "/data/user/0/example/cache",
+    "/data/user/0/example/files/node_modules",
+    envp);
+```
+
+该接口同步阻塞，直到脚本执行完成且 event loop 没有活动句柄才返回。应从专用
+native 线程调用，且不可并发调用：接口会修改进程级环境变量、工作目录和
+stdout/stderr。
+
 `node_android_run()` 返回 Node.js 退出码；参数或进程环境配置失败时返回
 `-1`，并通过 `errno` 指示原因。环境变量和工作目录修改是进程级的。
 
@@ -181,6 +203,10 @@ cp out/Release/libnode.so dist/android-arm64/libnode.so
 
 - `dist/android-arm64/libnode.so`：strip 后发布版本。
 - `dist/android-arm64/libnode.symbols.so`：带符号表调试版本，不随正式包发布到用户设备。
+- `dist/android-arm64/include/`：公开 ABI 对应头文件，可直接加入宿主或
+  Node-API addon 的 include path：
+  `node_android.h`、`node_api.h`、`node_api_types.h`、
+  `js_native_api.h`、`js_native_api_types.h` 和 `node_version.h`。
 
 链接阶段使用显式 version script 白名单链接 `libnode.so`。因此动态导出表
 只保留 `node_android_run`、Node-API/N-API 和 `node_module_register`；
@@ -191,7 +217,6 @@ Node embedding API、V8、OpenSSL、libuv、ICU、SQLite 以及 C++ ABI 辅助�
 2026-09-08 在 macOS + Android NDK 27.3.13750724 上实测 Android arm64
 构建成功。strip 版本约 92 MB，带符号版本约 122 MB，动态导出符号 163 个；
 运行时依赖为 `libc.so`、`libm.so`、`libdl.so` 和 `liblog.so`。
-- 必要公开头文件：`src/node.h`、`src/node_api.h`、`src/js_native_api.h`、`src/js_native_api_types.h`、`src/node_api_types.h`，以及使用 embedding API 时需要的 V8 / libuv 公开头文件。
 
 本次 arm64 Release 构建的 `libnode.so` 动态依赖为 Android 系统库：
 `libc.so`、`libm.so`、`libdl.so` 和 `liblog.so`。通过

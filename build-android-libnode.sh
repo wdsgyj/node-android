@@ -193,6 +193,16 @@ export GYP_DEFINES="target_arch=arm64 v8_target_arch=arm64 android_target_arch=a
   cp out/Release/libnode.so "$DIST_DIR/libnode.so"
   "$LLVM_STRIP" --strip-unneeded "$DIST_DIR/libnode.so"
 
+  # Keep the complete C ABI header closure beside the binary artifacts.
+  mkdir -p "$DIST_DIR/include"
+  cp src/node_android.h \
+     src/node_api.h \
+     src/node_api_types.h \
+     src/js_native_api.h \
+     src/js_native_api_types.h \
+     src/node_version.h \
+     "$DIST_DIR/include/"
+
   "$LLVM_READELF" -h "$DIST_DIR/libnode.so" | sed -n '1,24p'
   "$LLVM_READELF" -d "$DIST_DIR/libnode.so" | grep -E 'NEEDED|SONAME'
   "$LLVM_NM" -D --defined-only "$DIST_DIR/libnode.so" |
@@ -207,4 +217,6 @@ export GYP_DEFINES="target_arch=arm64 v8_target_arch=arm64 android_target_arch=a
 
   echo "artifacts:"
   ls -lh "$DIST_DIR/libnode.so" "$DIST_DIR/libnode.symbols.so"
+  echo "public headers:"
+  find "$DIST_DIR/include" -maxdepth 1 -type f -print | sort
 )

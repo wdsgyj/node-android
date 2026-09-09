@@ -381,7 +381,7 @@
 +}
 --- /dev/null
 +++ b/src/node_android.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,116 @@
 +// Copyright Node.js contributors. All rights reserved.
 +// Use of this source code is governed by a license that can be found in the
 +// LICENSE file.
@@ -389,6 +389,7 @@
 +#ifndef SRC_NODE_ANDROID_H_
 +#define SRC_NODE_ANDROID_H_
 +
++#include <errno.h>
 +#include <stddef.h>
 +
 +#if defined(_WIN32)
@@ -404,14 +405,80 @@
 +/*
 + * Starts Node.js using a main()-style argument vector.
 + *
-+ * argv must contain argc non-null strings and should normally include the
-+ * executable name at argv[0]. envp is an optional null-terminated list of
-+ * KEY=VALUE strings. Explicit directory arguments override values supplied
-+ * through envp. The environment and working directory changes are process
-+ * wide and remain in effect after this function returns.
++ * Parameters:
++ *
++ * - argc and argv:
++ *   These are equivalent to the arguments passed to the node executable.
++ *   argc must be greater than zero and argv must contain argc non-null
++ *   strings. argv[0] should normally be "node"; put Node CLI options before
++ *   the entry script and application arguments after it. Use an absolute
++ *   entry-script path where possible. The argument strings must remain valid
++ *   for the duration of this call.
++ *
++ * - cwd:
++ *   When non-null, this calls chdir(cwd) before Node.js starts. It controls
++ *   process.cwd(), relative entry-script paths, and relative filesystem paths
++ *   used by JavaScript. It does not create the directory, does not update the
++ *   PWD environment variable, and is not restored when this function returns.
++ *   Pass NULL to retain the host process current working directory.
++ *
++ * - home:
++ *   When non-null, this sets HOME. It affects process.env.HOME, os.homedir(),
++ *   and CommonJS historical global lookup directories
++ *   $HOME/.node_modules and $HOME/.node_libraries. It does not create or
++ *   validate the directory. Use an application-private writable directory.
++ *   Pass NULL to retain the HOME value supplied by envp or the host process.
++ *
++ * - tmpdir:
++ *   When non-null, this sets TMPDIR. It affects process.env.TMPDIR,
++ *   os.tmpdir(), and packages or APIs that create temporary files. It does
++ *   not create or validate the directory. Use an application-private writable
++ *   cache directory. Without a TMPDIR value, Android libuv falls back to
++ *   /data/local/tmp, which an ordinary application should not depend on.
++ *   Pass NULL to retain the TMPDIR value supplied by envp or the host process.
++ *
++ * - module_path:
++ *   When non-null, this sets NODE_PATH. On Android it is a colon-separated
++ *   list of additional absolute directories for CommonJS require() lookup.
++ *   NODE_PATH is searched only after normal local node_modules lookup and is
++ *   not a general ES module import search path. Prefer regular node_modules
++ *   directories beside the application package; shared NODE_PATH directories
++ *   can cause unexpected package-version selection. NODE_PATH and the HOME
++ *   global directories are disabled by the --no-global-search-paths option.
++ *   Pass NULL to retain the NODE_PATH value supplied by envp or the host
++ *   process.
++ *
++ * - envp:
++ *   Optional null-terminated KEY=VALUE strings used to set additional
++ *   process-wide environment variables, for example NODE_ENV,
++ *   NODE_ANDROID_LOG_TAG, TZ, or SSL_CERT_FILE. Every entry must contain an
++ *   equals sign and a non-empty key. KEY= sets an empty value; envp cannot
++ *   remove an environment variable. Variables are applied first, then
++ *   non-null home, tmpdir, and module_path override HOME, TMPDIR, and
++ *   NODE_PATH respectively.
++ *
++ * Example:
++ *
++ *   const char* argv[] = { "node", "/data/user/0/example/files/main.js" };
++ *   const char* envp[] = { "NODE_ENV=production", NULL };
++ *   int exit_code = node_android_run(
++ *       2, argv,
++ *       "/data/user/0/example/files",
++ *       "/data/user/0/example/files/home",
++ *       "/data/user/0/example/cache",
++ *       "/data/user/0/example/files/node_modules",
++ *       envp);
++ *
++ * This is synchronous: it returns only after the script completes and the
++ * Node.js event loop has no active handles. Invoke it from a dedicated native
++ * thread, and do not call it concurrently because it changes process-wide
++ * environment, working-directory and stdout/stderr state. Environment and
++ * working-directory changes remain after the call returns; stdout and stderr
++ * are restored on return.
 + *
 + * Returns the Node.js exit code, or -1 if the arguments or process setup are
-+ * invalid. errno identifies the setup failure in the latter case.
++ * invalid. errno identifies the setup failure in the latter case. A setup
++ * failure may occur after earlier environment changes have already been made.
 + *
 + * On Android, stdout is written to logcat with INFO priority and stderr with
 + * ERROR priority while Node.js is running. The logcat tag defaults to

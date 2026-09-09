@@ -27,7 +27,7 @@ Android App、JNI 或其他 native 宿主加载的 Node.js runtime 动态库。
 
 Node.js C++ embedding API、V8、OpenSSL、libuv、ICU、SQLite 以及 C++ ABI
 辅助符号不会进入动态导出表。调用方不需要直接依赖 `node.h` 或 V8 API，
-只需要包含 `node-24.20.0/src/node_android.h`。
+只需要使用构建产物中的 `dist/android-arm64/include/node_android.h`。
 
 入口声明：
 
@@ -125,6 +125,14 @@ dist/android-arm64/
 
 - `libnode.so`：strip 后发布版本，约 92 MB。
 - `libnode.symbols.so`：带符号调试版本，约 122 MB。
+- `include/`：与公开 ABI 对应、可独立包含的 C/C++ 头文件：
+  `node_android.h`、`node_api.h`、`node_api_types.h`、
+  `js_native_api.h`、`js_native_api_types.h` 和 `node_version.h`。
+
+宿主程序使用 `node_android_run()` 时包含 `node_android.h`；构建 Android
+Node-API addon 时使用 `node_api.h`。`node_android.h` 内含最小同步调用示例、
+参数说明和并发限制。调用方只需将 `include/` 加入头文件搜索路径，不依赖
+Node.js 源码目录。
 
 当前已验证的 Android arm64 Release 构建状态（2026-09-08）：
 
@@ -174,4 +182,4 @@ logcat 输出。
 - [docs/android-libnode.md](docs/android-libnode.md)：完整构建和集成说明。
 - [docs/android-smoke-test.js](docs/android-smoke-test.js)：JS API smoke test。
 - [patchs/node-24.20.0-android-libnode.patch](patchs/node-24.20.0-android-libnode.patch)：源码补丁。
-- [node-24.20.0/src/node_android.h](node-24.20.0/src/node_android.h)：公开 C ABI 头文件。
+- `dist/android-arm64/include/`：随二进制交付的公开 C ABI / Node-API 头文件。
